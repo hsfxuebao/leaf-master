@@ -34,6 +34,11 @@ public class LeafController {
         return get(key, segmentService.getId(key));
     }
 
+    /**
+     * snowflake模式获取id
+     * @param key 随便定义
+     * @return
+     */
     @RequestMapping(value = "/api/snowflake/get/{key}")
     public String getSnowflakeId(@PathVariable("key") String key) {
         return get(key, snowflakeService.getId(key));

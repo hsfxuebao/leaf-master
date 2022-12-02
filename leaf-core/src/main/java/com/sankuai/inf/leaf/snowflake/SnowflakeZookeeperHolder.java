@@ -29,16 +29,33 @@ import java.util.concurrent.TimeUnit;
 public class SnowflakeZookeeperHolder {
     private static final Logger LOGGER = LoggerFactory.getLogger(SnowflakeZookeeperHolder.class);
     private String zk_AddressNode = null;//保存自身的key  ip:port-000000001
+    /**
+     *本机ip:port，用于区分zk根节点下不同的节点
+     */
     private String listenAddress = null;//保存自身的key ip:port
     private int workerID;
     private static final String PREFIX_ZK_PATH = "/snowflake/" + PropertyFactory.getProperties().getProperty("leaf.name");
     private static final String PROP_PATH = System.getProperty("java.io.tmpdir") + File.separator + PropertyFactory.getProperties().getProperty("leaf.name") + "/leafconf/{port}/workerID.properties";
     private static final String PATH_FOREVER = PREFIX_ZK_PATH + "/forever";//保存所有数据持久的节点
+    /**
+     * 本机ip，用于区分不同的节点
+     */
     private String ip;
+    /**
+     * zk的端口
+     */
     private String port;
+    /**
+     * zk的ip地址
+     */
     private String connectionString;
     private long lastUpdateTime;
 
+    /**
+     * @param ip 本机器的ip地址
+     * @param port 连接zk的端口号
+     * @param connectionString zk的ip地址
+     */
     public SnowflakeZookeeperHolder(String ip, String port, String connectionString) {
         this.ip = ip;
         this.port = port;
@@ -46,39 +63,58 @@ public class SnowflakeZookeeperHolder {
         this.connectionString = connectionString;
     }
 
+    /**
+     * 初始化方法，包括：
+     * 1. 创建zk客户端连接会话并启动客户端
+     * 2. 检查/snowflake/${leaf.name}/forever根节点是否存在
+     * 3. 不存在则创建根节点，获取zk分配的workerId，并写入本地文件
+     * 4. 存在则查询到持久节点下属于自己的节点，得到zk分配的workerId，更新本地文件，校验是否时钟回拨
+     * 5. 如果启动失败，就从本地文件中读取，弱依赖zk
+     * @return
+     */
     public boolean init() {
         try {
+            // 1. 创建zk客户端连接会话并启动客户端
             CuratorFramework curator = createWithOptions(connectionString, new RetryUntilElapsed(1000, 4), 10000, 6000);
+            // 启动客户端
             curator.start();
+            // 2. 检查/snowflake/${leaf.name}/forever根节点是否存在
             Stat stat = curator.checkExists().forPath(PATH_FOREVER);
+            // 注意！！！！！这一段逻辑Leaf集群中只会有一个节点执行一次，所以下面workerId不需要从zk_AddressNode中解析赋值！！！！！
             if (stat == null) {
-                //不存在根节点,机器第一次启动,创建/snowflake/ip:port-000000000,并上传数据
+                //不存在根节点,机器第一次启动,则创建/snowflake/${leaf.name}/forever/ip:port-000000000，并写入自身节点标识和时间数据
                 zk_AddressNode = createNode(curator);
-                //worker id 默认是0
+                // 在本地缓存workerId，默认是0（因为此时还没有从zk获取到分配的workID，0是成员变量的默认值，这里可以不从zk_AddressNode解析workerID，直接默认0）
                 updateLocalWorkerID(workerID);
-                //定时上报本机时间给forever节点
+                // 定时上报本机时间戳给/snowflake/${leaf.name}/forever根节点
                 ScheduledUploadData(curator, zk_AddressNode);
                 return true;
+            // 4. 存在的话，说明不是第一次启动leaf应用，zk存在以前的【自身节点标识和时间数据】
             } else {
                 Map<String, Integer> nodeMap = Maps.newHashMap();//ip:port->00001
-                Map<String, String> realNode = Maps.newHashMap();//ip:port->(ipport-000001)
-                //存在根节点,先检查是否有属于自己的根节点
+                Map<String, String> realNode = Maps.newHashMap();//ip:port->(ip:port-000001)
+                // 存在根节点，先获取根节点下所有的子节点，检查是否有属于自己的节点
                 List<String> keys = curator.getChildren().forPath(PATH_FOREVER);
                 for (String key : keys) {
                     String[] nodeKey = key.split("-");
                     realNode.put(nodeKey[0], key);
                     nodeMap.put(nodeKey[0], Integer.parseInt(nodeKey[1]));
                 }
+                // 获取zk上曾经记录的workerId，这里可以看出workerId的分配是依靠zk的自增序列号
                 Integer workerid = nodeMap.get(listenAddress);
                 if (workerid != null) {
                     //有自己的节点,zk_AddressNode=ip:port
+                    // 有自己的节点，zk_AddressNode = /snowflake/${leaf.name}/forever+ip:port-0000001
                     zk_AddressNode = PATH_FOREVER + "/" + realNode.get(listenAddress);
                     workerID = workerid;//启动worder时使用会使用
+                    // 检查该节点当前的系统时间是否在最后一次上报时间之后
                     if (!checkInitTimeStamp(curator, zk_AddressNode)) {
+                        // 如果不滞后，则启动失败
                         throw new CheckLastTimeException("init timestamp check error,forever node timestamp gt this node time");
                     }
                     //准备创建临时节点
                     doService(curator);
+                    // 更新本地缓存的workerID
                     updateLocalWorkerID(workerID);
                     LOGGER.info("[Old NODE]find forever node have this endpoint ip-{} port-{} workid-{} childnode and start SUCCESS", ip, port, workerID);
                 } else {
@@ -86,6 +122,7 @@ public class SnowflakeZookeeperHolder {
                     String newNode = createNode(curator);
                     zk_AddressNode = newNode;
                     String[] nodeKey = newNode.split("-");
+                    // 获取到zk分配的id
                     workerID = Integer.parseInt(nodeKey[1]);
                     doService(curator);
                     updateLocalWorkerID(workerID);
@@ -93,6 +130,7 @@ public class SnowflakeZookeeperHolder {
                 }
             }
         } catch (Exception e) {
+            // 5. 如果启动出错，则读取本地缓存的workerID.properties文件中的workId
             LOGGER.error("Start node ERROR {}", e);
             try {
                 Properties properties = new Properties();
