@@ -1,9 +1,16 @@
 package com.sankuai.inf.leaf.segment.model;
 
+/**
+ * 分配bean，和数据库表记录基本对应
+ */
 public class LeafAlloc {
+    // 对应biz_tag
     private String key;
+    // 对应最大id
     private long maxId;
+    // 对应步长
     private int step;
+    // 对应更新时间
     private String updateTime;
 
     public String getKey() {

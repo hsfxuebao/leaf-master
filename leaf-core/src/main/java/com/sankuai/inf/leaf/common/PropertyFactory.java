@@ -6,6 +6,9 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.Properties;
 
+/**
+ * 加载leaf.properties配置文件中配置信息
+ */
 public class PropertyFactory {
     private static final Logger logger = LoggerFactory.getLogger(PropertyFactory.class);
     private static final Properties prop = new Properties();
